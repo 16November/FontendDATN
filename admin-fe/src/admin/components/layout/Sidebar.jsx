@@ -17,22 +17,27 @@ const Sidebar = () => {
       <MenuItem 
           icon={<FaTh />} 
           label="DashBoard" 
-          to="/admin" 
-          active={location.pathname === "/admin"} 
+          to="/teacher" 
+          active={location.pathname === "/teacher"} 
         />
         <MenuItem 
           icon={<FaFileAlt />} 
           label="Quản lý đề thi" 
-          to="/admin/exams" 
-          active={location.pathname.startsWith("/admin/exams")} 
+          to="/teacher/exams" 
+          active={location.pathname.startsWith("/teacher/exams")} 
         />
         <MenuItem 
           icon={<FaDatabase />} 
           label="Ngân hàng câu hỏi" 
-          to="/admin/questions" 
-          active={location.pathname.startsWith("/admin/questions")} 
+          to="/teacher/questions" 
+          active={location.pathname.startsWith("/teacher/questions")} 
         />
-        <MenuItem icon={<FaEye />} label="Giám sát thi" to="/monitor" active={location.pathname === "/monitor"} />
+        <MenuItem
+          icon={<FaEye/>}
+          label="Giám sát thi"
+          to="/teacher/monitor"
+          active={location.pathname.startsWith("/teacher/monitor")}
+        />
         <MenuItem icon={<FaChartBar />} label="Thống kê" to="/statistics" active={location.pathname === "/statistics"} />
         <MenuItem icon={<FaCog />} label="Cài đặt" to="/settings" active={location.pathname === "/settings"} />
       </nav>

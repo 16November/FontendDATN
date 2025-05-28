@@ -1,249 +1,372 @@
-import React, { useState } from 'react';
-import { FaUser, FaExpand, FaPause, FaCamera, FaMicrophone, FaEye, FaComment, FaExclamationTriangle, FaSyncAlt } from 'react-icons/fa';
-import { FaCalendarAlt, FaUserGraduate, FaMapMarkerAlt } from 'react-icons/fa';
+// MonitoringExam.jsx
+import React, { useState, useEffect, useRef } from "react";
+import {
+  FaUser,
+  FaExpand,
+  FaPause,
+  FaCamera,
+  FaMicrophone,
+  FaEye,
+  FaComment,
+  FaExclamationTriangle,
+  FaSyncAlt,
+  FaClock, // Thêm import FaClock
+} from "react-icons/fa";
+import { FaCalendarAlt, FaUserGraduate, FaMapMarkerAlt } from "react-icons/fa";
+import Hls from 'hls.js'; // Import Hls.js
 
 const MonitoringExam = () => {
   const [selectedStudent, setSelectedStudent] = useState(null);
+  const [examData, setExamData] = useState(null);
+  const [studentList, setStudentList] = useState([]);
+  const [hlsStreamUrl, setHlsStreamUrl] = useState(null); // State để lưu trữ URL HLS
+  const [streamStatus, setStreamStatus] = useState("idle"); // idle, loading, streaming, error
+  const [streamError, setStreamError] = useState(null);
 
-  const handleStudentSelect = (student) => {
-    setSelectedStudent(student);
+  const videoRef = useRef(null); // Ref cho thẻ video HTML
+
+  const API_BASE_URL = "https://localhost:7128/api"; // Đảm bảo đúng base URL API của bạn
+
+  useEffect(() => {
+    // Lấy dữ liệu bài thi từ localStorage
+    const savedExam = localStorage.getItem("selectedExam");
+    if (savedExam) {
+      setExamData(JSON.parse(savedExam));
+    }
+    fetchData(); // Gọi hàm fetch dữ liệu học sinh khi component mount
+  }, []); // [] đảm bảo useEffect chỉ chạy một lần sau render đầu tiên
+
+  useEffect(() => {
+    // Logic khởi tạo và xử lý HLS.js
+    if (hlsStreamUrl && videoRef.current) {
+      if (Hls.isSupported()) {
+        const hls = new Hls();
+        hls.loadSource(hlsStreamUrl);
+        hls.attachMedia(videoRef.current);
+        hls.on(Hls.Events.MANIFEST_PARSED, function () {
+          console.log("HLS manifest parsed, attempting to play video.");
+          videoRef.current.play().catch(e => console.error("Error playing video:", e));
+        });
+        hls.on(Hls.Events.ERROR, function (event, data) {
+          console.error('HLS.js error:', data);
+          setStreamError(`HLS Playback Error: ${data.details} - ${data.fatal ? 'Fatal error, attempting to recover...' : ''}`);
+          if (data.fatal) {
+            switch(data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                // Try to recover network errors
+                console.warn("Fatal network error, attempting to recover...");
+                hls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                console.warn("Fatal media error, attempting to recover...");
+                hls.recoverMediaError();
+                break;
+              default:
+                // Cannot recover
+                hls.destroy();
+                setStreamStatus('error');
+                break;
+            }
+          }
+        });
+
+        // Cleanup function cho HLS.js
+        return () => {
+          if (hls) {
+            hls.destroy();
+            console.log("HLS.js instance destroyed.");
+          }
+        };
+      } else if (videoRef.current.canPlayType('application/vnd.apple.mpegurl')) {
+        // Hỗ trợ HLS gốc trên trình duyệt (Safari)
+        videoRef.current.src = hlsStreamUrl;
+        videoRef.current.addEventListener('loadedmetadata', () => {
+          videoRef.current.play().catch(e => console.error("Error playing video (native):", e));
+        });
+        // Cleanup cho native HLS
+        return () => {
+          if (videoRef.current) {
+            videoRef.current.removeEventListener('loadedmetadata', () => {
+              videoRef.current.play();
+            });
+            videoRef.current.src = "";
+            videoRef.current.load();
+          }
+        };
+      } else {
+        setStreamError("Trình duyệt của bạn không hỗ trợ phát HLS.");
+        setStreamStatus('error');
+      }
+    } else {
+      // Nếu hlsStreamUrl không có hoặc videoRef không tồn tại, đảm bảo không có gì đang phát
+      if (videoRef.current) {
+        videoRef.current.pause();
+        videoRef.current.src = "";
+        videoRef.current.load();
+      }
+    }
+  }, [hlsStreamUrl]); // Dependency array: chạy lại khi hlsStreamUrl thay đổi
+
+  const fetchData = async () => {
+    try {
+      // Mock examId, thay thế bằng examId thực tế nếu cần
+      const examId = "2d8d0680-1b6b-b3fb-e120-08dd88093733"; 
+      const response = await fetch(`${API_BASE_URL}/UserExam/getListStudent?examId=${examId}`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      setStudentList(data);
+    } catch (error) {
+      console.error("Error fetching student list:", error);
+      // Xử lý lỗi khi lấy danh sách học sinh
+    }
   };
 
-  return (
-    <div className="p-6">
+  const requestStartStream = async (userId) => {
+    setStreamStatus('loading');
+    setStreamError(null);
+    setHlsStreamUrl(null);
+
+    try {
+      // Bước 1: Gửi lệnh start_stream
+      const startResponse = await fetch(`${API_BASE_URL}/Teacher/start-student-stream?userId=${userId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!startResponse.ok) {
+        throw new Error(`Failed to send start stream command: ${startResponse.statusText}`);
+      }
+
+      console.log(`Đã gửi lệnh 'start_stream' đến học sinh ${userId}`);
+
+      // Thêm delay để đợi student khởi tạo stream
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Bước 2: Thử lấy URL stream với retry
+      let retryCount = 0;
+      const maxRetries = 3;
       
+      while (retryCount < maxRetries) {
+        try {
+          const streamUrlResponse = await fetch(`${API_BASE_URL}/Streaming/url/${userId}`);
+          
+          if (streamUrlResponse.ok) {
+            const data = await streamUrlResponse.json();
+            if (data && data.streamUrl) {
+              const fullStreamUrl = `https://localhost:7128${data.streamUrl}`;
+              console.log(`Đã nhận URL HLS (attempt ${retryCount + 1}):`, fullStreamUrl);
+              
+              setHlsStreamUrl(fullStreamUrl);
+              setStreamStatus('streaming');
+              setSelectedStudent(studentList.find(s => s.userId === userId));
+              return; // Thoát khi thành công
+            }
+          }
+          
+          // Nếu không thành công, đợi 1s trước khi thử lại
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          retryCount++;
+          
+        } catch (error) {
+          console.warn(`Attempt ${retryCount + 1} failed:`, error);
+          if (retryCount === maxRetries - 1) throw error;
+        }
+      }
 
-      {/* Exam Info Card */}
-      <div className="bg-white rounded-lg p-6 shadow-sm mb-6">
-        <h2 className="text-xl font-semibold text-gray-800 mb-4">Kỳ thi tốt nghiệp THPT 2023 - Môn Toán</h2>
-        <div className="flex flex-wrap gap-8 mb-4">
-          <div className="flex items-center gap-2 text-gray-600">
-            <FaCalendarAlt />
-            <span>10/06/2023 - 08:00 - 10:00</span>
-          </div>
-          <div className="flex items-center gap-2 text-gray-600">
-            <FaUserGraduate />
-            <span>125 thí sinh</span>
-          </div>
-          <div className="flex items-center gap-2 text-gray-600">
-            <FaMapMarkerAlt />
-            <span>Hội đồng thi THPT Nguyễn Du</span>
-          </div>
-        </div>
-        <div>
-          <div className="flex justify-between mb-2">
-            <span>Tiến độ thi: 65%</span>
-            <span>Thời gian còn lại: 35 phút</span>
-          </div>
-          <div className="w-full h-2 bg-gray-200 rounded-full">
-            <div className="w-[65%] h-full bg-blue-500 rounded-full"></div>
-          </div>
-        </div>
-      </div>
+      throw new Error('Failed to get stream URL after multiple attempts');
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
-        <div className="bg-white rounded-lg p-6 shadow-sm text-center">
-          <div className="text-gray-600">Thí sinh đang thi</div>
-          <div className="text-3xl font-bold text-gray-800 my-2">98</div>
-          <div className="text-gray-600">/ 125</div>
-        </div>
-        <div className="bg-white rounded-lg p-6 shadow-sm text-center">
-          <div className="text-gray-600">Cảnh báo gian lận</div>
-          <div className="text-3xl font-bold text-yellow-500 my-2">5</div>
-          <div className="text-gray-600">cần kiểm tra</div>
-        </div>
-        <div className="bg-white rounded-lg p-6 shadow-sm text-center">
-          <div className="text-gray-600">Kết nối lỗi</div>
-          <div className="text-3xl font-bold text-red-500 my-2">3</div>
-          <div className="text-gray-600">thí sinh</div>
-        </div>
-        <div className="bg-white rounded-lg p-6 shadow-sm text-center">
-          <div className="text-gray-600">Đã nộp bài</div>
-          <div className="text-3xl font-bold text-green-500 my-2">24</div>
-          <div className="text-gray-600">thí sinh</div>
-        </div>
-      </div>
+    } catch (error) {
+      console.error("Lỗi khi bắt đầu hoặc lấy stream:", error);
+      setStreamError(error.message);
+      setStreamStatus('error');
+    }
+  };
 
-      {/* Live Monitoring */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-        <div className="lg:col-span-2 bg-gray-900 rounded-lg p-4 h-[300px] relative">
-          <div className="h-full flex items-center justify-center text-gray-400">
-            {selectedStudent ? (
-              <div className="text-center">
-                <FaUser className="text-5xl mx-auto mb-4" />
-                <div>Đang giám sát: {selectedStudent.name}</div>
-                <div className="text-sm mt-2">Khung hình sẽ hiển thị tại đây</div>
-              </div>
-            ) : (
-              <div className="text-center">
-                <FaUser className="text-5xl mx-auto mb-4" />
-                <div>Màn hình giám sát thí sinh</div>
-                <div className="text-sm mt-2">Chọn thí sinh để xem</div>
-              </div>
+  const requestStopStream = async (userId) => {
+    try {
+      // Gửi lệnh stop_stream đến học sinh qua kênh điều khiển
+      const stopResponse = await fetch(`${API_BASE_URL}/Teacher/stop-student-stream?userId=${userId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          // 'Authorization': `Bearer ${token}` // Thêm token nếu có authentication
+        },
+      });
+
+      if (!stopResponse.ok) {
+        const errorData = await stopResponse.json();
+        throw new Error(errorData.error || `Failed to send stop stream command: ${stopResponse.statusText}`);
+      }
+
+      console.log(`Đã gửi lệnh 'stop_stream' đến học sinh ${userId}`);
+      setStreamStatus('idle'); // Chuyển trạng thái về idle
+      setHlsStreamUrl(null); // Xóa URL để dừng phát video
+      setSelectedStudent(null); // Bỏ chọn học sinh
+      if (videoRef.current) {
+        videoRef.current.pause();
+        videoRef.current.src = ""; // Xóa src của video player
+        videoRef.current.load(); // Tải lại để xóa bộ đệm
+      }
+
+    } catch (error) {
+      console.error("Lỗi khi dừng stream:", error);
+      setStreamError(error.message);
+    }
+  };
+
+  // Logic hiển thị video player ở đây
+  return (
+    <div className="p-6 bg-gray-100 min-h-screen">
+      <h2 className="text-3xl font-bold text-gray-800 mb-6">Giám sát bài thi</h2>
+
+      {examData && (
+        <div className="bg-white p-6 rounded-lg shadow-md mb-6">
+          <h3 className="text-2xl font-semibold text-purple-700 mb-4">Thông tin bài thi</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <p className="flex items-center text-gray-700">
+              <FaCalendarAlt className="mr-2 text-purple-500" />
+              <span className="font-medium">Tên bài thi:</span> {examData.examName}
+            </p>
+            <p className="flex items-center text-gray-700">
+              <FaCalendarAlt className="mr-2 text-purple-500" />
+              <span className="font-medium">Ngày thi:</span>{" "}
+              {new Date(examData.examDate).toLocaleDateString()}
+            </p>
+            <p className="flex items-center text-gray-700">
+              <FaClock className="mr-2 text-purple-500" />
+              <span className="font-medium">Thời gian:</span> {examData.durationMinutes} phút
+            </p>
+            <p className="flex items-center text-gray-700">
+              <FaUserGraduate className="mr-2 text-purple-500" />
+              <span className="font-medium">Số lượng thí sinh:</span>{" "}
+              {studentList.length}
+            </p>
+            <p className="flex items-center text-gray-700">
+              <FaMapMarkerAlt className="mr-2 text-purple-500" />
+              <span className="font-medium">Mã môn học:</span>{" "}
+              {examData.subjectCode}
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Phần hiển thị Video Stream */}
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <h3 className="text-2xl font-semibold text-purple-700 mb-4">
+            {selectedStudent ? `Màn hình của: ${selectedStudent.fullName}` : "Chọn học sinh để xem màn hình"}
+          </h3>
+          <div className="w-full bg-gray-200 rounded-md flex items-center justify-center relative overflow-hidden" style={{ height: '400px' }}>
+            {streamStatus === 'loading' && (
+              <p className="text-gray-600 text-lg">Đang tải stream...</p>
+            )}
+            {streamStatus === 'error' && (
+              <p className="text-red-500 text-lg">Lỗi stream: {streamError}</p>
+            )}
+            {hlsStreamUrl && streamStatus === 'streaming' && (
+              <video ref={videoRef} controls autoPlay muted className="w-full h-full object-contain"></video>
+            )}
+            {streamStatus === 'idle' && !selectedStudent && (
+                 <p className="text-gray-600 text-lg">Chưa có màn hình nào được chọn.</p>
+            )}
+            {streamStatus === 'idle' && selectedStudent && (
+                 <p className="text-gray-600 text-lg">Đã dừng stream màn hình của {selectedStudent.fullName}.</p>
             )}
           </div>
-          <div className="absolute bottom-4 left-4 right-4 flex justify-center gap-3">
-            <button className="w-10 h-10 rounded-full bg-black/50 text-white flex items-center justify-center">
-              <FaExpand />
-            </button>
-            <button className="w-10 h-10 rounded-full bg-black/50 text-white flex items-center justify-center">
-              <FaPause />
-            </button>
-            <button className="w-10 h-10 rounded-full bg-black/50 text-white flex items-center justify-center">
-              <FaCamera />
-            </button>
-            <button className="w-10 h-10 rounded-full bg-black/50 text-white flex items-center justify-center">
-              <FaMicrophone />
-            </button>
-          </div>
         </div>
 
-        <div className="bg-white rounded-lg p-4 h-[300px] overflow-y-auto">
-          <h3 className="text-lg font-semibold mb-4">Nhật ký hoạt động</h3>
-          <div className="space-y-4">
-            <div className="pb-3 border-b">
-              <span className="text-sm text-gray-500">10:05:23</span>
-              <p>Thí sinh Nguyễn Văn A đã nộp bài</p>
-            </div>
-            <div className="pb-3 border-b">
-              <span className="text-sm text-gray-500">10:03:45</span>
-              <p>Cảnh báo: Thí sinh Trần Thị B có hành vi bất thường</p>
-            </div>
-            <div className="pb-3 border-b">
-              <span className="text-sm text-gray-500">10:01:12</span>
-              <p>Thí sinh Lê Văn C mất kết nối</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Candidates List */}
-      <div className="bg-white rounded-lg p-6 shadow-sm">
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
-          <h3 className="text-lg font-semibold">Danh sách thí sinh</h3>
-          <div className="flex flex-wrap gap-3">
-            <select className="px-4 py-2 border rounded-lg">
-              <option>Tất cả trạng thái</option>
-              <option>Đang thi</option>
-              <option>Đã nộp bài</option>
-              <option>Có cảnh báo</option>
-              <option>Mất kết nối</option>
-            </select>
-            <select className="px-4 py-2 border rounded-lg">
-              <option>Tất cả phòng thi</option>
-              <option>Phòng 101</option>
-              <option>Phòng 102</option>
-              <option>Phòng 103</option>
-            </select>
-            <input
-              type="text"
-              placeholder="Tìm kiếm..."
-              className="px-4 py-2 border rounded-lg"
-            />
-          </div>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="bg-gray-50">
-                <th className="px-4 py-3 text-left text-gray-600">STT</th>
-                <th className="px-4 py-3 text-left text-gray-600">Thí sinh</th>
-                <th className="px-4 py-3 text-left text-gray-600">Mã thí sinh</th>
-                <th className="px-4 py-3 text-left text-gray-600">Phòng thi</th>
-                <th className="px-4 py-3 text-left text-gray-600">Trạng thái</th>
-                <th className="px-4 py-3 text-left text-gray-600">Tiến độ</th>
-                <th className="px-4 py-3 text-left text-gray-600">Hành động</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[
-                {
-                  id: 1,
-                  name: 'Nguyễn Văn A',
-                  code: 'TS2023001',
-                  room: '101',
-                  status: 'active',
-                  progress: 75
-                },
-                {
-                  id: 2,
-                  name: 'Trần Thị B',
-                  code: 'TS2023002',
-                  room: '101',
-                  status: 'warning',
-                  progress: 60
-                },
-                {
-                  id: 3,
-                  name: 'Lê Văn C',
-                  code: 'TS2023003',
-                  room: '102',
-                  status: 'inactive',
-                  progress: 30
-                }
-              ].map((student) => (
-                <tr
-                  key={student.id}
-                  className="border-b hover:bg-gray-50 cursor-pointer"
-                  onClick={() => handleStudentSelect(student)}
-                >
-                  <td className="px-4 py-3">{student.id}</td>
-                  <td className="px-4 py-3">{student.name}</td>
-                  <td className="px-4 py-3">{student.code}</td>
-                  <td className="px-4 py-3">{student.room}</td>
-                  <td className="px-4 py-3">
-                    <span className={`px-3 py-1 rounded-full text-sm ${
-                      student.status === 'active' ? 'bg-green-100 text-green-800' :
-                      student.status === 'warning' ? 'bg-yellow-100 text-yellow-800' :
-                      'bg-red-100 text-red-800'
-                    }`}>
-                      {student.status === 'active' ? 'Đang thi' :
-                       student.status === 'warning' ? 'Cảnh báo' :
-                       'Mất kết nối'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="w-full h-2 bg-gray-200 rounded-full">
-                      <div
-                        className={`h-full rounded-full ${
-                          student.status === 'active' ? 'bg-blue-500' :
-                          student.status === 'warning' ? 'bg-yellow-500' :
-                          'bg-red-500'
-                        }`}
-                        style={{ width: `${student.progress}%` }}
-                      ></div>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-2">
-                      <button className="text-blue-500 hover:text-blue-700">
-                        <FaEye />
-                      </button>
-                      <button className="text-blue-500 hover:text-blue-700">
-                        <FaComment />
-                      </button>
-                      {student.status === 'warning' && (
-                        <button className="text-red-500 hover:text-red-700">
-                          <FaExclamationTriangle />
-                        </button>
-                      )}
-                      {student.status === 'inactive' && (
-                        <button className="text-blue-500 hover:text-blue-700">
-                          <FaSyncAlt />
-                        </button>
-                      )}
-                    </div>
-                  </td>
+        {/* Danh sách học sinh */}
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <h3 className="text-2xl font-semibold text-purple-700 mb-4 flex items-center justify-between">
+            Danh sách thí sinh
+            <button
+              onClick={fetchData} // Tải lại danh sách
+              className="text-gray-500 hover:text-gray-700"
+              title="Làm mới danh sách"
+            >
+              <FaSyncAlt />
+            </button>
+          </h3>
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    ID
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    MSSV
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Họ tên
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Trạng thái
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Hành động
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {studentList.map((student) => (
+                  <tr
+                    key={student.userId}
+                    className={selectedStudent && selectedStudent.userId === student.userId ? "bg-blue-50" : "hover:bg-gray-50"}
+                  >
+                    <td className="px-4 py-3">{student.userId}</td>
+                    <td className="px-4 py-3">{student.mssv}</td>
+                    <td className="px-4 py-3">{student.fullName}</td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`px-3 py-1 rounded-full text-sm ${
+                          student.isStarted
+                            ? "bg-green-100 text-green-800"
+                            : "bg-gray-100 text-gray-800"
+                        }`}
+                      >
+                        {student.isStarted ? "Đang thi" : "Chưa vào thi"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-2">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); requestStartStream(student.userId); }}
+                          className="text-blue-500 hover:text-blue-700"
+                          title="Xem màn hình"
+                          disabled={streamStatus === 'loading' || streamStatus === 'streaming' && selectedStudent?.userId === student.userId}
+                        >
+                          <FaEye />
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); requestStopStream(student.userId); }}
+                          className="text-red-500 hover:text-red-700"
+                          title="Dừng màn hình"
+                          disabled={streamStatus !== 'streaming' || selectedStudent?.userId !== student.userId}
+                        >
+                          <FaPause /> {/* Dùng biểu tượng pause để dừng */}
+                        </button>
+                        <button
+                          className="text-blue-500 hover:text-blue-700"
+                          title="Gửi thông báo"
+                        >
+                          <FaComment />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
   );
 };
 
-export default MonitoringExam; 
+export default MonitoringExam;

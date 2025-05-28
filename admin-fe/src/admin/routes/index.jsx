@@ -12,7 +12,7 @@ const PlaceholderPage = ({ title }) => (
 );
 
 export const adminRoutes = {
-  path: '/admin',
+  path: '/teacher',
   element: <Layout />,
   children: [
     { index: true, element: <Dashboard /> },
