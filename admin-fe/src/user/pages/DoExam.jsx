@@ -34,7 +34,7 @@ const DoExam = () => {
   const screenshotTimerRef = useRef();
   const mainContentRef = useRef(null);
 
-  const userId = "6be704c8-606b-b3fb-81f0-08dd9957528b"; // Mock user ID
+  const userId = "837a04f0-576b-b3fb-f49f-08dd91885d21"; // Mock user ID
   // Hàm chụp màn hình và gửi lên server
   // const takeScreenshot = async () => {
   //   if (!mainContentRef.current || isSubmitted) return;
@@ -94,7 +94,7 @@ const DoExam = () => {
     //   return;
     // }
     // const userId = sessionStorage.getItem("userId");
-    const userId = "6be704c8-606b-b3fb-81f0-08dd9957528b";
+    const userId = "837a04f0-576b-b3fb-f49f-08dd91885d21";
     async function fetchData() {
       try {
         const [examRes, questionRes] = await Promise.all([
@@ -209,7 +209,7 @@ const DoExam = () => {
     try {
       const token = sessionStorage.getItem("token");
       // const userId = sessionStorage.getItem("userId");
-      const userId = "6be704c8-606b-b3fb-81f0-08dd9957528b";
+      const userId = "837a04f0-576b-b3fb-f49f-08dd91885d21";
       
       const userAnswers = 
       Object.entries(answers).map(([questionId, answerId]) => ({

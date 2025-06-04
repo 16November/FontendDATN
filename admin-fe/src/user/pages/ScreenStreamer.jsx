@@ -1,224 +1,222 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from "react";
+import * as signalR from "@microsoft/signalr";
 
 const ScreenStreamer = ({ userId }) => {
-  const [status, setStatus] = useState('Chờ kết nối...');
+  const [status, setStatus] = useState("Chờ kết nối...");
   const [error, setError] = useState(null);
+  const [streamId, setStreamId] = useState(null);
 
-  const streamWsRef = useRef(null);    // WebSocket gửi video chunks
-  const controlWsRef = useRef(null);   // WebSocket nhận lệnh control
+  const wsRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const streamRef = useRef(null);
-  const reconnectTimeoutRef = useRef(null);
-  const reconnectAttemptsRef = useRef(0);
+  const signalRRef = useRef(null);
 
-  // --- Kết nối WebSocket streaming ---
-  const connectStreamWebSocket = () => {
-    if (streamWsRef.current) {
-      streamWsRef.current.close();
-      streamWsRef.current = null;
-    }
+  useEffect(() => {
+    const connection = new signalR.HubConnectionBuilder()
+      .withUrl(`https://localhost:7128/notificationHub?userId=${userId}`)
+      .withAutomaticReconnect()
+      .build();
 
-    setStatus('Đang kết nối WebSocket stream...');
-    const ws = new WebSocket(`wss://localhost:7128/api/Streaming/ws-stream?userId=${userId}`);
-    ws.binaryType = 'arraybuffer';
-    streamWsRef.current = ws;
+    connection.on("ReceiveRequestShare", async () => {
+      try {
+        setStatus("Nhận yêu cầu chia sẻ màn hình từ giáo viên.");
+        const res = await fetch(`https://localhost:7128/api/student/accept-share/${userId}`, {
+          method: "POST",
+        });
+        if (!res.ok) throw new Error(`Lỗi get share: ${res.status}`);
 
-    ws.onopen = () => {
-      setStatus('WebSocket stream đã kết nối');
-      reconnectAttemptsRef.current = 0;
-      console.log('[StreamWS] Connected');
-    };
-
-    ws.onclose = e => {
-      console.log('[StreamWS] Closed', e.code, e.reason);
-      setStatus(`WebSocket stream đóng kết nối: ${e.code} - ${e.reason}`);
-
-      if (reconnectAttemptsRef.current < 5) {
-        const delay = Math.pow(2, reconnectAttemptsRef.current) * 1000;
-        reconnectAttemptsRef.current++;
-        setStatus(`Thử kết nối lại WebSocket stream sau ${delay / 1000}s...`);
-        reconnectTimeoutRef.current = setTimeout(() => {
-          connectStreamWebSocket();
-        }, delay);
-      } else {
-        setStatus('Không thể kết nối lại WebSocket stream');
+        const session = await res.json();
+        if (session && session.streamId) {
+          setStreamId(session.streamId);
+          setStatus("Đã nhận streamId, chuẩn bị kết nối WebSocket...");
+          startStreaming();
+        } else {
+          setError("Không tìm thấy session hoặc streamId không hợp lệ.");
+          setStatus("Lỗi khi nhận yêu cầu chia sẻ");
+        }
+      } catch (err) {
+        setError(err.message);
+        setStatus("Lỗi khi nhận yêu cầu chia sẻ");
+        console.error("Error on ReceiveRequestShare:", err);
       }
-    };
+    });
 
-    ws.onerror = e => {
-      console.error('[StreamWS] Error', e);
-      setStatus('Lỗi WebSocket stream');
-    };
+    connection.on("StopShare", () => {
+      setStatus("Nhận lệnh dừng chia sẻ màn hình.");
+      stopStreaming();
+    });
 
-    ws.onmessage = e => {
-      // Có thể xử lý message server gửi về (nếu cần)
-      // console.log('[StreamWS] Message:', e.data);
-    };
-  };
+    connection
+      .start()
+      .then(() => {
+        setStatus("SignalR connected. Chờ lệnh từ giáo viên...");
+        signalRRef.current = connection;
+      })
+      .catch((e) => {
+        setStatus("SignalR connection failed");
+        setError(`Lỗi kết nối SignalR: ${e.message}`);
+        console.error("SignalR connection error:", e);
+      });
 
-  // --- Kết nối WebSocket control để nhận lệnh từ teacher ---
-  const connectControlWebSocket = () => {
-    if (controlWsRef.current) {
-      controlWsRef.current.close();
-      controlWsRef.current = null;
-    }
-
-    const ws = new WebSocket(`wss://localhost:7128/api/Teacher/ws-control?userId=${userId}`);
-    controlWsRef.current = ws;
-
-    ws.onopen = () => {
-      console.log('[ControlWS] Connected');
-      setStatus('WebSocket control đã kết nối, chờ lệnh từ teacher');
-    };
-
-    ws.onmessage = (event) => {
-      const msg = event.data;
-      console.log('[ControlWS] Received:', msg);
-
-      if (msg === 'start_stream') {
-        startStreaming();
-      } else if (msg === 'stop_stream') {
-        stopStreaming();
+    return () => {
+      if (signalRRef.current) {
+        connection.stop();
       }
+      stopStreaming();
     };
+  }, [userId]);
 
-    ws.onclose = () => {
-      console.log('[ControlWS] Disconnected');
-      setStatus('WebSocket control bị đóng');
-      // Có thể thêm logic reconnect nếu cần
-    };
-
-    ws.onerror = (e) => {
-      console.error('[ControlWS] Error', e);
-      setStatus('Lỗi WebSocket control');
-    };
-  };
-
-  // --- Bắt đầu quay màn hình và stream ---
-  const startStreaming = async () => {
+  const acceptShare = async () => {
+    setStatus("Kiểm tra session hiện có...");
     setError(null);
 
     try {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        console.log('[startStreaming] Đang ghi rồi, bỏ qua');
-        setStatus('Đang quay màn hình và gửi dữ liệu...');
+      const res = await fetch(`https://localhost:7128/api/student/accept-share/${userId}`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`Lỗi get share: ${res.status}`);
+
+      const session = await res.json();
+      if (!session?.streamId) throw new Error("Không tìm thấy session");
+
+      setStreamId(session.streamId);
+      setStatus("Đã nhận streamId, chuẩn bị kết nối WebSocket...");
+      return session.streamId;
+    } catch (e) {
+      setError(e.message);
+      setStatus("Lỗi khi lấy session");
+      console.error("Error in acceptShare:", e);
+      throw e;
+    }
+  };
+
+  const connectWebSocket = (streamId) =>
+    new Promise((resolve, reject) => {
+      if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+        wsRef.current.close(1000, "Reconnecting");
+        wsRef.current = null;
+      }
+      const wsUrl = `wss://localhost:7128/api/student/${streamId}/ws`;
+      setStatus(`Kết nối WebSocket đến ${wsUrl}...`);
+      const ws = new WebSocket(wsUrl);
+      ws.binaryType = "arraybuffer";
+      wsRef.current = ws;
+
+      const connectTimeout = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          ws.close(1000, "WebSocket connection timeout");
+          reject(new Error("Timeout kết nối WebSocket"));
+        }
+      }, 15000);
+
+      ws.onopen = () => {
+        clearTimeout(connectTimeout);
+        setStatus("WebSocket đã kết nối");
+        resolve(ws);
+      };
+
+      ws.onclose = (e) => {
+        clearTimeout(connectTimeout);
+        setStatus(`WebSocket đóng kết nối: Code ${e.code}, Reason: ${e.reason || "Không rõ"}`);
+        if (e.code !== 1000) {
+          setError(`WebSocket closed unexpectedly: Code ${e.code}`);
+        }
+      };
+
+      ws.onerror = (e) => {
+        setStatus("Lỗi WebSocket");
+        setError("Lỗi WebSocket");
+        console.error("WebSocket error:", e);
+      };
+    });
+
+  const startStreamingInternal = async () => {
+    try {
+      if (mediaRecorderRef.current?.state === "recording") {
+        setStatus("Đang quay màn hình...");
         return;
       }
 
-      // Lấy stream màn hình
+      const currentStreamId = await acceptShare();
+      await connectWebSocket(currentStreamId);
+
+      setStatus("Yêu cầu quyền truy cập màn hình...");
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
       streamRef.current = stream;
 
-      // Kiểm tra định dạng mimeType
-      let mimeType = 'video/webm;codecs=vp9';
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = 'video/webm;codecs=vp8';
-        if (!MediaRecorder.isTypeSupported(mimeType)) {
-          mimeType = 'video/webm';
-          if (!MediaRecorder.isTypeSupported(mimeType)) {
-            throw new Error('Không có định dạng MediaRecorder phù hợp');
+      const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")
+        ? "video/webm;codecs=vp8,opus"
+        : "video/webm";
+
+      mediaRecorderRef.current = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 1500000 });
+
+      mediaRecorderRef.current.ondataavailable = async (event) => {
+        if (!event.data || event.data.size === 0) return;
+        const buffer = await event.data.arrayBuffer();
+
+        const time = new Date().toLocaleTimeString();
+        const sizeKB = (event.data.size / 1024).toFixed(2);
+
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          try {
+            wsRef.current.send(buffer);
+            console.log(`${time} | Sent: ${sizeKB}KB`);
+          } catch (error) {
+            console.warn(`${time} | Failed to send: ${sizeKB}KB. Error: ${error.message}`);
           }
-        }
-      }
-
-      mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
-
-      mediaRecorderRef.current.ondataavailable = event => {
-        if (event.data && event.data.size > 0) {
-          if (streamWsRef.current && streamWsRef.current.readyState === WebSocket.OPEN) {
-            streamWsRef.current.send(event.data);
-            console.log(`[MediaRecorder] Gửi chunk ${event.data.size} bytes`);
-          } else {
-            console.warn('[MediaRecorder] WebSocket stream chưa sẵn sàng để gửi');
-          }
+        } else {
+          console.warn(`${time} | WebSocket not open. Not sending data.`);
         }
       };
 
-      mediaRecorderRef.current.onerror = e => {
-        console.error('[MediaRecorder] Error:', e.error);
-        setError('Lỗi MediaRecorder: ' + e.error.message);
+      mediaRecorderRef.current.onerror = (e) => {
+        setError(`Lỗi MediaRecorder: ${e.error?.message || "Không xác định"}`);
+        console.error("MediaRecorder error:", e);
       };
 
-      mediaRecorderRef.current.onstart = () => {
-        setStatus('Đang quay màn hình và gửi dữ liệu...');
-        console.log('[MediaRecorder] Bắt đầu ghi');
-      };
-
-      mediaRecorderRef.current.onstop = () => {
-        setStatus('Đã dừng ghi');
-        console.log('[MediaRecorder] Dừng ghi');
-      };
-
-      // Kết nối WebSocket streaming nếu chưa kết nối
-      if (!streamWsRef.current || streamWsRef.current.readyState !== WebSocket.OPEN) {
-        connectStreamWebSocket();
-        // Chờ 500ms để WS kết nối ổn định trước khi start
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-
-      mediaRecorderRef.current.start(1000); // Ghi video chunk mỗi 1 giây
-
-    } catch (err) {
-      console.error('Lỗi khi lấy màn hình:', err);
-      setError('Lỗi khi lấy màn hình: ' + err.message);
-      setStatus('Lỗi khi bắt đầu quay màn hình');
-    }
-  };
-
-  // --- Dừng quay và đóng stream + WS ---
-  const stopStreaming = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
-    }
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-
-    if (streamWsRef.current) {
-      streamWsRef.current.close();
-      streamWsRef.current = null;
-    }
-
-    setStatus('Đã dừng streaming');
-  };
-
-  // --- Cleanup khi component unmount ---
-  useEffect(() => {
-    connectControlWebSocket();
-
-    return () => {
+      mediaRecorderRef.current.start(3000); // Tăng timeslice lên 3 giây để giảm độ trễ
+      setStatus("Đang quay màn hình và gửi dữ liệu...");
+    } catch (e) {
+      setError(e.message);
+      setStatus("Lỗi khi bắt đầu quay màn hình");
+      console.error("Error in startStreamingInternal:", e);
       stopStreaming();
-      if (controlWsRef.current) {
-        controlWsRef.current.close();
-        controlWsRef.current = null;
-      }
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-    };
-  }, []);
+    }
+  };
+
+
+  const startStreaming = () => {
+    startStreamingInternal();
+  };
+
+  const stopStreaming = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
+      setStatus("Đang dừng MediaRecorder...");
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      console.log("Media stream tracks stopped.");
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.close(1000, "User stopped streaming");
+      console.log("WebSocket connection closed.");
+    }
+    wsRef.current = null;
+    mediaRecorderRef.current = null;
+
+    setStatus("Đã dừng streaming");
+    setError(null);
+    setStreamId(null);
+  };
 
   return (
-    <div style={{ maxWidth: 600, margin: 'auto', fontFamily: 'Arial, sans-serif' }}>
-      <h2>Screen Capture Streamer</h2>
-      <p><strong>Status:</strong> {status}</p>
-      {error && <p style={{color:'red'}}>{error}</p>}
-
-      {/* Nút test thủ công (không bắt buộc) */}
-      <button
-        onClick={startStreaming}
-        style={{ marginRight: 10, padding: '8px 16px' }}
-      >
-        Bắt đầu quay màn hình & stream
-      </button>
-      <button
-        onClick={stopStreaming}
-        style={{ padding: '8px 16px' }}
-      >
-        Dừng stream
-      </button>
+    <div>
+      <h2>Screen Capture Streamer (Student)</h2>
+      <p><b>Status:</b> {status}</p>
+      {error && <p style={{ color: "red" }}>⚠️ {error}</p>}
+      <p><b>StreamId:</b> {streamId || "Chưa có"}</p>
     </div>
   );
 };
